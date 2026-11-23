@@ -281,6 +281,32 @@ class BaseModuleService:
         except Exception as e:
             return {"auto_trigger": "rollback", "source_key": source_key, "error": str(e)}
 
+    def _trigger_agent_rollback(
+        self,
+        agent_code: str,
+        to_offset: int,
+        *,
+        raw_input: dict[str, Any] | None = None,
+        context: dict[str, Any] | None = None,
+        confirmation_token: str | None = None,
+        event_key: str = "",
+    ) -> dict[str, Any]:
+        """按代理归属解析契约回滚关联源位点（离线/失败恢复共用）。"""
+        try:
+            cls = self._safe_import(
+                "app.services.collect_checkpoint", "CollectCheckpointService")
+            return cls().rollback_agent_position(
+                agent_code,
+                to_offset,
+                operation="offline-rollback",
+                raw_input=raw_input,
+                context=context,
+                confirmation_token=confirmation_token,
+                event_key=event_key,
+            )
+        except Exception as e:
+            return {"auto_trigger": "agent-rollback", "agent_code": agent_code, "error": str(e)}
+
     def _trigger_dedup_for_source(self, source_key: str) -> dict[str, Any]:
         """自动触发窗口去重。"""
         try:

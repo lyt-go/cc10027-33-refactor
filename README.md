@@ -77,5 +77,23 @@ npm run dev
 - 列表接口统一返回 `{ items, total, page, size }`，动作接口统一返回 `{ ok, message }`。
 - 状态流转只允许在 `app/services` 里改，路由层不做业务判断。
 
+## 代理采集位置解析契约
+
+`backend/app/services/agent_source_resolution.py` 是代理编号到日志源位点的唯一
+归属来源，心跳保存进度和离线回滚都调用它，不再各自实现一遍编号解析。
+
+- 归属优先级：调用方显式指定的源 > 代理登记行里的显式关联 > 历史别名归属 >
+  `AGENT-` 前缀兼容推导。旧实现里的 `agent_code.replace("AGENT-", "")` 结果
+  保持不变，已确认的源解析结果不变。
+- 任何一层出现多个不同源都返回 `ambiguous`：不猜、不写位点、不改动候选源
+  已有的历史位点。候选源和收到时的原输入写入
+  `data/checkpoints/agent_source_resolution.jsonl`，可经
+  `GET /api/agent-source-resolution/trace` 回查。
+- 位点命名空间保持分离：`agent_<代理编号>.json` 只存心跳/代理状态，
+  `<源编号>.json` 存采集位置，回查时两者仍可分别看到。
+- 确认凭据（`confirmation_token`）记录在 `agent_confirmation_ledger.json`：
+  同一凭据成功落位后重复投递只返回原结果、不再写位点；写失败会标记
+  `failed`，用同一凭据重试成功后才生效，因此恢复后同一凭据只更新一次位置。
+
 领域：数据工程
 子方向：数据采集、爬虫与RPA

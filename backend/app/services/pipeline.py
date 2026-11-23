@@ -260,11 +260,18 @@ class CrossModulePipeline:
         return results
 
     def agent_checkpoint_pipeline(self, agent_code: str) -> dict[str, Any]:
-        """代理心跳+位点管道：心跳上报 -> 位点同步 -> 离线检测。"""
+        """代理心跳+位点管道：心跳上报 -> 按解析契约保存位点 -> 离线检测。"""
         started_at = time.time()
-        results = {"pipeline": "agent_checkpoint", "stages": {}}
+        results = {"pipeline": "agent_checkpoint", "agent_code": agent_code, "stages": {}}
 
-        # 阶段1: 代理心跳上报
+        raw_input = {
+            "agent_code": agent_code,
+            "pipeline": "agent_checkpoint",
+            "requested_offset": 4096,
+            "requested_line_number": 200,
+        }
+
+        # 阶段1: 代理心跳上报（只写 agent_<编号>.json，不动任何日志源位点）
         heartbeat_r = self.agent_heartbeat.send_heartbeat(agent_code, {
             "collected": 1500,
             "error_rate": 0.02,
@@ -272,13 +279,40 @@ class CrossModulePipeline:
         })
         results["stages"]["heartbeat"] = heartbeat_r
 
-        # 阶段2: 保存位点
-        cp_r = self.collect_checkpoint.save_checkpoint(agent_code, 4096, 200)
+        # 阶段2: 保存位点（经契约解析到实际日志源，再登记位置）
+        cp_r = self.collect_checkpoint.record_agent_position(
+            agent_code, 4096, 200,
+            operation="heartbeat-progress",
+            raw_input=raw_input,
+            context={"source": "agent_checkpoint_pipeline"},
+        )
         results["stages"]["checkpoint"] = cp_r
+        resolved_source = cp_r.get("source_key") or cp_r.get("attribution", {}).get("source_key")
+        results["source_key"] = resolved_source
+        results["confirmation_token"] = cp_r.get("confirmation_token")
 
-        # 阶段3: 离线检测
+        # 阶段3: 离线检测（回滚按同一归属解析，不会改到别的源）
         offline = self.agent_heartbeat.detect_offline_agents()
         results["stages"]["offline_detection"] = {"offline_count": len(offline), "agents": offline}
+
+        # 心跳结果与位置结果分开回查
+        results["heartbeat_result"] = {
+            "agent_code": agent_code,
+            "status": heartbeat_r.get("status"),
+            "heartbeat_at": heartbeat_r.get("heartbeat_at"),
+            "checkpoint_file": f"agent_{agent_code}.json",
+        }
+        results["position_result"] = {
+            "source_key": resolved_source,
+            "status": cp_r.get("status"),
+            "offset": cp_r.get("offset"),
+            "confirmation_token": cp_r.get("confirmation_token"),
+            "duplicate": cp_r.get("duplicate", False),
+            "checkpoint_file": f"{resolved_source}.json" if resolved_source else None,
+        }
+        if "error" in cp_r:
+            results["position_result"]["error"] = cp_r["error"]
+            results["position_result"]["candidates"] = cp_r.get("candidates", [])
 
         results["duration"] = round(time.time() - started_at, 2)
         return results

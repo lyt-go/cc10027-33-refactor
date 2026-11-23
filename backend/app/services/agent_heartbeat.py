@@ -70,15 +70,38 @@ class AgentHeartbeatService(BaseModuleService):
                 agent_code = a["代理编号"]
                 offline_item = {"代理编号": agent_code, "last_heartbeat": a.get("上次心跳"), "seconds_since": now - last_hb}
 
-                # 自动触发位点回滚：将关联源位点回滚到0
-                source_key = agent_code.replace("AGENT-", "")
-                if source_key:
-                    try:
-                        rollback_r = self._trigger_checkpoint_rollback(source_key, 0)
-                        if "error" not in rollback_r:
-                            offline_item["auto_rollback"] = rollback_r
-                    except Exception:
-                        pass
+                # 离线结论写回代理自己的心跳命名空间，和源位点分开保存
+                agent_state = self._read_checkpoint(f"agent_{agent_code}") or {}
+                agent_state.update({
+                    "agent_code": agent_code,
+                    "status": "已离线",
+                    "last_heartbeat": agent_state.get("last_heartbeat", last_hb),
+                    "host": a.get("部署主机", agent_state.get("host", "")),
+                    "offline_at": now,
+                })
+                self._write_checkpoint(f"agent_{agent_code}", agent_state)
+
+                # 自动触发位点回滚：与保存进度共用同一份归属解析契约
+                raw_input = {
+                    "agent_code": agent_code,
+                    "trigger": "offline-detection",
+                    "status": a.get("status"),
+                    "last_heartbeat": a.get("上次心跳"),
+                    "seconds_since": now - last_hb,
+                }
+                rollback_r = self._trigger_agent_rollback(
+                    agent_code, 0,
+                    raw_input=raw_input,
+                    context={"source": "detect_offline_agents"},
+                    event_key=f"offline:{agent_code}:{a.get('上次心跳') or ''}",
+                )
+                source_key = rollback_r.get("source_key") or ""
+                if "error" not in rollback_r:
+                    offline_item["auto_rollback"] = rollback_r
+                else:
+                    # 歧义/未归属时也保留结论，便于回查为何没有回滚
+                    offline_item["rollback_skipped"] = rollback_r
+                offline_item["source_key"] = source_key
 
                 # 触发告警通知
                 try:
@@ -86,6 +109,7 @@ class AgentHeartbeatService(BaseModuleService):
                         "agent_status": "已离线",
                         "message": f"代理 {agent_code} 离线，已超时 {int(now - last_hb)}秒",
                         "source_key": source_key,
+                        "confirmation_token": rollback_r.get("confirmation_token"),
                     })
                     offline_item["alert_triggered"] = True
                 except Exception:
